@@ -1,0 +1,10 @@
+{
+  "language": "typescript",
+  "app": "npm run --silent build && node --experimental-specifier-resolution=node ./built/terraplain.js",
+  "terraformProviders": ["google@~> 4.1"],
+  "context": {
+    "excludeStackIdFromLogicalIds": "true",
+    "allowSepCharsInLogicalIds": "true"
+  },
+  "projectId": "68dcc503-e402-4b89-9fcf-98d71a95221d"
+}

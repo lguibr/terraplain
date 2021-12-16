@@ -1,0 +1,7 @@
+{
+  "watch": ["example"],
+  "ext": ".js",
+  "ignore": [],
+  "delay": 200,
+  "exec": "functions-framework --target=get.handler --port=3001"
+}
