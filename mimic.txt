@@ -1,0 +1,541 @@
+File: lib/getPath.ts
+import * as fs from 'fs'
+import * as path from 'path'
+
+export default function getPath(pathString?: string) {
+  const resolvedPath = path.resolve(pathString || '.')
+  const realPath = fs.realpathSync.native(resolvedPath)
+  return realPath
+}
+
+File: providers/google/bigQuery/index.ts
+import { Construct } from 'constructs'
+import { TerraformOutput } from 'cdktf'
+import {
+  BigqueryDataset,
+  BigqueryDatasetConfig,
+  BigqueryTable,
+  BigqueryTableConfig,
+  // BigqueryJob,
+} from '@cdktf/provider-google'
+
+
+const provideGBigQueryDataSet = (
+  context: Construct,
+  datasetConfig: BigqueryDatasetConfig,
+  tablesConfig?: BigqueryTableConfig[]
+) => {
+  const {
+    datasetId,
+    friendlyName: friendlyNameDataSet,
+    ...configs
+  } = datasetConfig
+
+  //INFO Create the dataset on BigQuery
+  const dataset = new BigqueryDataset(
+    context,
+    `dataset-${friendlyNameDataSet || datasetId}`,
+    {
+      friendlyName: friendlyNameDataSet,
+      datasetId,
+      ...configs
+    }
+  )
+
+  //INFO Create each tables contained in the dataset
+  tablesConfig?.map(tableConfig => {
+    const { friendlyName: friendlyNameTable, tableId, ...configs } = tableConfig
+
+
+    // const projectId = context.node.tryGetContext(
+    //   'PROJECT_ID'
+    // )
+
+    // const newJobReplicateTable = new BigqueryJob(context, `job-${friendlyNameTable || tableId}`, {
+    //   jobId: `job-${friendlyNameTable || tableId}-migration-replicate-2`,
+    //   project: projectId,
+      
+    //   query: {
+
+    //     writeDisposition: 'WRITE_TRUNCATE',
+    //     createDisposition:'CREATE_IF_NEEDED',
+    //     allowLargeResults: true,
+    //     schemaUpdateOptions: ['ALLOW_FIELD_ADDITION', 'ALLOW_FIELD_RELAXATION'],
+    //     query: 'CREATE OR REPLACE TABLE `my_bigquery_dataset_test.my_bigquery_table_test` AS SELECT * EXCEPT (newstate), CAST(newstate AS FLOAT) AS state FROM `my_bigquery_dataset_test.my_bigquery_table_test`;',
+    //     destinationTable: {
+    //       tableId,
+    //       datasetId,
+    //       projectId
+    //     }
+
+    //   }
+
+    // })
+
+    // const { query } = newJobReplicateTable
+    // console.log({ newJobReplicateTable })
+    // console.log({ query })
+
+
+    const table = new BigqueryTable(
+      context,
+      `${datasetId} - table - ${friendlyNameTable || tableId}`,
+      {
+        tableId,
+        ...configs,
+        datasetId,
+        friendlyName: friendlyNameTable
+      }
+    )
+
+    new TerraformOutput(
+      context,
+      `big - query - dataset - ${datasetId} - table - ${friendlyNameTable || tableId}`,
+      { value: friendlyNameTable || tableId }
+    )
+
+    return table
+  })
+
+  new TerraformOutput(
+    context,
+    `big - query - dataset - name - ${friendlyNameDataSet || datasetId} `,
+    { value: dataset?.friendlyUniqueId }
+  )
+
+  return dataset
+}
+
+export default { provideGBigQueryDataSet }
+
+
+File: providers/google/functions/index.ts
+import * as path from 'path'
+
+import { Construct } from 'constructs'
+import { TerraformOutput, AssetType, TerraformAsset } from 'cdktf'
+import {
+  CloudfunctionsFunctionIamMember,
+  CloudfunctionsFunction,
+  ProjectService,
+  CloudfunctionsFunctionConfig,
+  CloudSchedulerJobHttpTarget,
+  ServiceAccount
+} from '@cdktf/provider-google'
+
+import gStorage from '../storage'
+import gScheduler, { CronExpression } from '../scheduler'
+
+
+
+export interface SimplerCloudSchedulerHttpTarget
+  extends Partial<CloudSchedulerJobHttpTarget> {
+  uri?: string
+}
+
+
+export interface SimplerCloudFunctionConfig
+  extends Partial<CloudfunctionsFunctionConfig> {
+  name: string
+  runtime?: string
+  entryPoint: string
+  allowPublic?: boolean
+  cron: {
+    cronExpression?: CronExpression
+    httpTarget?: SimplerCloudSchedulerHttpTarget
+  }
+}
+
+export interface SimplerCloudfunctionsFunctionIamMemberConfig
+  extends Partial<CloudfunctionsFunctionConfig> {
+  readonly member?: string
+  readonly role?: string
+}
+
+export type GFunction = {
+  context: Construct
+  functionConfig: SimplerCloudFunctionConfig
+  iamFunctionConfig?: SimplerCloudfunctionsFunctionIamMemberConfig
+}
+
+//INFO Enable the cloud resources manager api
+const enableGFunction = (context: Construct): void => {
+  //INFO Enable the cloud build resource to build the gFunction
+  new ProjectService(context, 'ProjectServiceCloudBuild', {
+    service: 'cloudbuild.googleapis.com'
+  })
+
+  //INFO Enable the functions API
+  new ProjectService(context, 'ProjectServiceCloudFunction', {
+    service: 'cloudfunctions.googleapis.com'
+  })
+}
+
+const provideGFunction = async (gFunction: GFunction): Promise<CloudfunctionsFunction> => {
+  const { context, functionConfig, iamFunctionConfig } = gFunction
+
+  const { provideGStorage, provideGStorageObject } = gStorage
+
+  const {
+    name,
+    entryPoint,
+    runtime,
+    buildEnvironmentVariables,
+    availableMemoryMb,
+    description,
+    eventTrigger,
+    environmentVariables,
+    labels,
+    httpsTriggerUrl,
+    maxInstances,
+    region,
+    project,
+    sourceArchiveBucket,
+    sourceArchiveObject,
+    sourceRepository,
+    timeout,
+    timeouts,
+    triggerHttp,
+    allowPublic,
+    cron,
+  } = functionConfig
+
+  const projectId = context.node.tryGetContext('PROJECT_ID')
+
+  console.log(`functionConfig ${functionConfig}`)
+
+
+  //INFO GCP's Buckets can't have more that 64 characters
+  const sourceFunctionBucketName = `fn-bucket-${name}`
+
+  //INFO Create bucket to hold source code
+  const SourceCodeBucket = provideGStorage(context, {
+    name: sourceFunctionBucketName
+  })
+
+
+
+
+  //INFO Obtain the function source code as ${project_name}.zip
+  const defaultSourceCodeFileName = process.env.npm_package_name + '.zip'
+
+  const defaultSourceCodePath = path.join(
+    process.cwd(),
+    './' + defaultSourceCodeFileName
+  )
+
+  const assetSourceCodeFunction = new TerraformAsset(
+    context,
+    `function-source-code-asset-${name}`,
+    {
+      type: AssetType.FILE,
+      path: defaultSourceCodePath
+    }
+  )
+
+  console.log(
+    `assetSourceCodeFunction.assetHash: ${assetSourceCodeFunction.assetHash}`
+  )
+
+  //INFO Upload the zip function's source code to the target bucket as ${milliseconds_timestamp}${package_name}.zip
+  const SourceCodeBucketObject = provideGStorageObject(context, {
+    bucket: SourceCodeBucket?.name,
+    source: assetSourceCodeFunction.path,
+    name: `${assetSourceCodeFunction.assetHash}-${name}`
+  })
+
+  //INFO Create the cloud function
+  const GoogleCloudFunction = new CloudfunctionsFunction(
+    context,
+    `provide-function-${name}`,
+    {
+      //INFO default parameters
+      region: region || process.env.REGION,
+      runtime: runtime || 'nodejs16',
+      triggerHttp: triggerHttp || true,
+      sourceArchiveBucket: sourceArchiveBucket || SourceCodeBucket?.name,
+      sourceArchiveObject: sourceArchiveObject || SourceCodeBucketObject?.name,
+
+      //INFO Optional parameters
+      name: `${projectId}-${name}`,
+      buildEnvironmentVariables,
+      availableMemoryMb,
+      description,
+      eventTrigger,
+      environmentVariables,
+      labels,
+      httpsTriggerUrl,
+      project,
+      sourceRepository,
+      timeout,
+      timeouts,
+      maxInstances,
+      entryPoint
+    }
+  )
+
+  if (allowPublic) {
+    //INFO Create the cloud function IAM member allowing public access.
+    new CloudfunctionsFunctionIamMember(
+      context,
+      `function-iam-member-${name}`,
+      {
+        cloudFunction: GoogleCloudFunction?.name,
+
+        //INFO Allow all users including not authenticated users...
+        member: 'allUsers',
+
+        //INFO To have a role as function invover in this function
+        role: 'roles/cloudfunctions.invoker'
+      }
+    )
+  }
+
+  //INFO allow add custom IAM members to the cloud function
+  const member = iamFunctionConfig?.member
+  const role = iamFunctionConfig?.role
+  if (member && role) {
+    new CloudfunctionsFunctionIamMember(
+      context,
+      `function-iam-member-${name}`,
+      {
+        cloudFunction: GoogleCloudFunction?.name,
+        member,
+        role
+      }
+    )
+  }
+
+  if (cron) {
+    const { httpTarget, cronExpression } = cron
+    const { provideScheduler, } = gScheduler
+
+    const accountId = `sa-fn-${name}-invoker`.slice(0, 30)
+
+    const serviceAccountFunctionInvoker = new ServiceAccount(
+      context,
+      `service-account-fn-${name}-invoker`,
+      {
+        accountId
+      }
+    )
+
+    console.log(`serviceAccountFunctionInvoker : ${serviceAccountFunctionInvoker}`)
+
+    const { email } = serviceAccountFunctionInvoker
+
+    const scheduled = provideScheduler(context, {
+      name: `${name}-scheduler`,
+      description: `function ${name} scheduler`,
+      schedule: cronExpression,
+      httpTarget: {
+        uri: GoogleCloudFunction?.httpsTriggerUrl || '',
+        httpMethod: 'GET',
+        oidcToken: {
+          serviceAccountEmail: email
+        },
+        ...httpTarget
+      }
+    })
+
+
+    new TerraformOutput(context, `scheduler-function-url-trigger-${name}`, {
+      value: scheduled?.toString()
+    })
+
+    new CloudfunctionsFunctionIamMember(
+      context,
+      `scheduler-function-iam-member-${name}`,
+      {
+        cloudFunction: GoogleCloudFunction?.name,
+        member: `serviceAccount:${email}`,
+        role: 'roles/cloudfunctions.invoker'
+      }
+    )
+
+
+  }
+
+
+
+  new TerraformOutput(context, `function-url-trigger-${name}`, {
+    value: GoogleCloudFunction?.httpsTriggerUrl
+  })
+
+  return GoogleCloudFunction
+}
+
+export default { enableGFunction, provideGFunction }
+
+
+File: providers/google/provider/index.ts
+import * as fs from 'fs'
+import { Construct } from 'constructs'
+import { GoogleProvider, ProjectService } from '@cdktf/provider-google'
+import { GcsBackend } from 'cdktf'
+
+const enableGoogleResources = (context: Construct) => {
+  //INFO Loading the provider's credentials from a JSON file
+  const credentialsPath = process.env.GOOGLE_CREDENTIALS_PATH || 'google.json'
+  console.log(`credentialsPath: ${credentialsPath}`)
+
+  const credentials = fs.existsSync(credentialsPath)
+    ? fs.readFileSync(credentialsPath).toString()
+    : '{}'
+
+  const projectId = context.node.tryGetContext('PROJECT_ID')
+  const region = context.node.tryGetContext('REGION')
+  const tfStateBucket = context.node.tryGetContext('BUCKET_TF_STATE')
+
+  //INFO set credential in the context to be used in TF's root module to
+  context.node.setContext('credentials', credentials)
+  console.log(`credentials: ${credentials}`)
+
+
+  //INFO provide the remote state of the stack to the GCS's BUCKET_TF_STATE
+  new GcsBackend(context, {
+    credentials,
+    bucket: tfStateBucket || 'state',
+    prefix: 'terraform.state'
+  })
+
+  //INFO Create the cloud provider
+  new GoogleProvider(context, 'GoogleAuth', {
+    region,
+    zone: region + '-c',
+    project: projectId,
+    credentials
+  })
+
+  //INFO Enable the cloud resources manager api
+  new ProjectService(context, 'ProjectServiceCloudResourceManager', {
+    service: 'cloudresourcemanager.googleapis.com'
+  })
+
+  //INFO Enable the IAM manager api
+  new ProjectService(context, 'ProjectServiceIAM', {
+    service: 'iam.googleapis.com'
+  })
+}
+
+export default { enableGoogleResources }
+
+
+File: providers/google/storage/index.ts
+import {
+  StorageBucket,
+  StorageBucketConfig,
+  StorageBucketObject,
+  StorageBucketObjectConfig
+} from '@cdktf/provider-google'
+
+import { Construct } from 'constructs'
+
+import { TerraformOutput } from 'cdktf'
+
+const provideGStorage = (
+  context: Construct,
+  bucketConfig: StorageBucketConfig
+) => {
+  const { name, ...restConfig } = bucketConfig
+
+  //INFO GCP's Buckets can't have more that 64 characters
+  const bucketName = `${context.node.tryGetContext(
+    'PROJECT_ID'
+  )}-${name}`.slice(0, 63)
+
+  //INFO Create bucket
+  const SourceCodeBucket = new StorageBucket(
+    context,
+    `provide-bucket-${name}`,
+    {
+      name: bucketName,
+      ...restConfig
+    }
+  )
+
+  new TerraformOutput(context, `storage-bucket-url-${name}`, {
+    value: SourceCodeBucket?.url
+  })
+
+  return SourceCodeBucket
+}
+
+const provideGStorageObject = (
+  context: Construct,
+  bucketObjectConfig: StorageBucketObjectConfig
+) => {
+  const { name, bucket, source, ...restConfig } = bucketObjectConfig
+
+  //INFO Create bucket object/upload file to bucket
+  const SourceCodeBucketObject = new StorageBucketObject(
+    context,
+    `bucket-object-${name}`,
+    {
+      bucket,
+      source,
+      name,
+      ...restConfig
+    }
+  )
+
+  new TerraformOutput(context, `storage-bucket-object-url-${name}`, {
+    value: SourceCodeBucketObject?.outputName
+  })
+  return SourceCodeBucketObject
+}
+
+export default { provideGStorage, provideGStorageObject }
+
+
+File: providers/google/scheduler/index.ts
+import {
+  CloudSchedulerJob,
+  CloudSchedulerJobConfig,
+  ProjectService,
+  AppEngineApplication
+} from '@cdktf/provider-google'
+
+import { Construct } from 'constructs'
+
+
+type CronAllString = '*'
+type CronAtom = CronAllString | number
+type CronPartial = CronAtom | `${number},${number}` | `${number}-${number}` | `${number}/${number}`
+export type CronExpression = `${CronPartial} ${CronPartial} ${CronPartial} ${CronPartial} ${CronPartial}`
+
+
+
+const provideScheduler = (
+  context: Construct,
+  schedulerConfig: CloudSchedulerJobConfig
+) => {
+  const { name, ...restConfig } = schedulerConfig
+
+  const scheduledJob = new CloudSchedulerJob(
+    context,
+    `scheduled-job-${name}`,
+    {
+      name,
+
+      ...restConfig,
+    }
+  )
+
+  return scheduledJob
+}
+const enableScheduler = (
+  context: Construct,
+) => {
+  //INFO Enable the APP Engine API
+  new ProjectService(context, 'ProjectServiceScheduler', {
+    service: 'cloudscheduler.googleapis.com'
+  })
+  new AppEngineApplication(context, 'AppEngineApplicationScheduler', {
+    locationId: 'us-central1',
+  })
+}
+
+export default { provideScheduler, enableScheduler }
+
+
