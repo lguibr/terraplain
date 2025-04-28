@@ -1,5 +1,9 @@
 # Terraplain: GCP Resource Automation using Terraform CDK in TypeScript
 
+<p align="center">
+  <img src="bitmap.png" alt="Logo" width="300"/>
+</p>
+
 Terraplain aims to bootstrap APIs with automated provisioning of cloud resources on the Google Cloud Platform (GCP) using the Terraform Cloud Development Kit (CDK) in TypeScript.
 
 ## Getting Started
